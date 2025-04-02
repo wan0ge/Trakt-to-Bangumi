@@ -16,11 +16,15 @@ def load_config():
     if not os.path.exists('config.ini'):
         print("未找到配置文件，创建默认配置文件 'config.ini'")
         config['API'] = {
-            'tmdb_api_key': '请输入你的API Key(API密钥)'
+            'tmdb_api_key': '请输入你的API Key(API密钥)',
+            'trakt_client_id': '请输入你的Trakt Client ID'  # 新增Trakt API配置
         }
         config['Files'] = {
             'input_csv': '请输入你的文件名.csv',
             'output_csv': 'bangumi_export.csv'
+        }
+        config['Settings'] = {
+            'watch_status': '看过'  # 添加默认的观看状态设置
         }
         
         with open('config.ini', 'w', encoding='utf-8') as configfile:
@@ -28,10 +32,77 @@ def load_config():
     
     # 读取配置文件
     config.read('config.ini', encoding='utf-8')
+    
+    # 确保Settings部分存在
+    if 'Settings' not in config:
+        config['Settings'] = {}
+    
+    # 确保watch_status设置存在
+    if 'watch_status' not in config['Settings']:
+        config['Settings']['watch_status'] = '看过'
+        with open('config.ini', 'w', encoding='utf-8') as configfile:
+            config.write(configfile)
+    
     return config
 
 # 全局配置对象
 CONFIG = load_config()
+
+def get_trakt_data(trakt_id):
+    """通过Trakt API获取影视数据"""
+    # 从配置文件获取Trakt Client ID
+    trakt_client_id = CONFIG['API'].get('trakt_client_id', '')
+    
+    if not trakt_client_id or trakt_client_id == '请输入你的Trakt Client ID':
+        print("Trakt Client ID未配置，无法获取Trakt数据")
+        return None
+    
+    url = f"https://api.trakt.tv/shows/{trakt_id}" if trakt_id else None
+    
+    # 如果无法确定类型（电影还是剧集），先尝试剧集，然后尝试电影
+    if url:
+        headers = {
+            "Content-Type": "application/json",
+            "trakt-api-version": "2",
+            "trakt-api-key": trakt_client_id
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                show_data = response.json()
+                print(f"成功获取剧集数据: {show_data.get('title')}")
+                
+                # 从Trakt获取TMDB ID
+                tmdb_id = show_data.get("ids", {}).get("tmdb")
+                if tmdb_id:
+                    # 使用TMDB ID获取详细信息
+                    return get_tmdb_details(tmdb_id, "tv")
+                else:
+                    print(f"Trakt剧集数据中没有TMDB ID")
+            elif response.status_code == 404:
+                # 尝试获取电影数据
+                url = f"https://api.trakt.tv/movies/{trakt_id}"
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    movie_data = response.json()
+                    print(f"成功获取电影数据: {movie_data.get('title')}")
+                    
+                    # 从Trakt获取TMDB ID
+                    tmdb_id = movie_data.get("ids", {}).get("tmdb")
+                    if tmdb_id:
+                        # 使用TMDB ID获取详细信息
+                        return get_tmdb_details(tmdb_id, "movie")
+                    else:
+                        print(f"Trakt电影数据中没有TMDB ID")
+                else:
+                    print(f"Trakt API请求失败: {response.status_code}")
+            else:
+                print(f"Trakt API请求失败: {response.status_code}")
+        except Exception as e:
+            print(f"Trakt API请求失败: {str(e)}")
+    
+    return None
 
 def get_tmdb_data(imdb_id):
     """通过 TMDB API 获取影视数据"""
@@ -242,7 +313,7 @@ def search_bangumi(title, japanese_title, released, year=None):
     if results:
         return _process_bangumi_results(results, title, japanese_title, released, year)
     
-    return None, None, None, None
+    return None, None, None, None, 0.0  # 添加相似度分数作为返回值
 
 def _search_bangumi_api(encoded_title):
     """调用Bangumi API进行搜索"""
@@ -256,7 +327,12 @@ def _search_bangumi_api(encoded_title):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
-        if response.status_code == 200 and response.text.strip():
+        if response.status_code == 200:
+            # 检查响应内容是否为空
+            if not response.text.strip():
+                print(f"Bangumi API返回空响应，可能是API速率限制或搜索条件无效：{encoded_title}")
+                return []
+                
             try:
                 data = response.json()
                 
@@ -265,15 +341,27 @@ def _search_bangumi_api(encoded_title):
                     return data["list"]
                 elif isinstance(data, list):
                     return data
-                
+                else:
+                    print(f"Bangumi API返回了意外的数据结构：{data}")
+                    return []
+                    
             except json.JSONDecodeError as e:
-                print(f"JSON解析错误: {str(e)}")
+                print(f"JSON解析错误: {str(e)}, 响应内容: {response.text[:100]}...")
+                return []
+        else:
+            print(f"Bangumi API请求失败，状态码: {response.status_code}")
+            return []
         
         # 避免API速率限制
-        time.sleep(0.5)
+        time.sleep(0.3)  # 增加间隔时间
         
+    except requests.exceptions.Timeout:
+        print(f"Bangumi API请求超时")
+        time.sleep(2)  # 超时后增加更长的等待时间
+        return []
     except Exception as e:
         print(f"Bangumi API请求出错: {str(e)}")
+        return []
     
     return []
 
@@ -281,6 +369,7 @@ def _process_bangumi_results(results, title, japanese_title, released, year):
     """处理Bangumi搜索结果并找出最佳匹配"""
     best_match = None
     best_score = 0
+    best_similarity = 0  # 保存最佳匹配的相似度
     
     for item in results:
         bgm_id = item.get("id")
@@ -317,6 +406,7 @@ def _process_bangumi_results(results, title, japanese_title, released, year):
         # 更新最佳匹配
         if score > best_score:
             best_score = score
+            best_similarity = title_similarity  # 保存相似度
             best_match = item
     
     # 如果最佳分数达到阈值
@@ -326,11 +416,12 @@ def _process_bangumi_results(results, title, japanese_title, released, year):
             best_match.get("id"),
             best_match.get("name"),
             best_match.get("name_cn", ""),
-            best_match.get("air_date", best_match.get("date", ""))  # 返回Bangumi的放送日期
+            best_match.get("air_date", best_match.get("date", "")),  # 返回Bangumi的放送日期
+            best_similarity  # 返回最高标题相似度
         )
     
     print(f"未找到足够可信的匹配项 (最高分数: {best_score})")
-    return None, None, None, None
+    return None, None, None, None, 0.0
 
 def check_title_similarity(source_title, bgm_title, bgm_cn_title):
     """检查标题相似度"""
@@ -396,7 +487,7 @@ def get_bangumi_details(bgm_id):
             return data
         
         # 避免API速率限制
-        time.sleep(0.5)
+        time.sleep(0.3)
     except Exception as e:
         print(f"获取Bangumi详情失败: {str(e)}")
     
@@ -407,6 +498,15 @@ def convert_csv():
     # 从配置文件读取输入输出文件名
     input_csv = CONFIG['Files']['input_csv']
     output_csv = CONFIG['Files']['output_csv']
+    
+    # 从配置文件读取自定义的观看状态
+    watch_status = CONFIG['Settings']['watch_status']
+    print(f"使用自定义观看状态: {watch_status}")
+    
+    # 创建日志文件名
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    success_log = f"success_log_{timestamp}.csv"
+    failure_log = f"failure_log_{timestamp}.csv"
     
     if not os.path.exists(input_csv):
         print(f"文件 {input_csv} 不存在！")
@@ -428,6 +528,16 @@ def convert_csv():
         # 修改CSV表头，增加制作地区字段
         writer.writerow(["ID", "类型", "中文", "日文", "放送", "排名", "评分", "话数", "看到", "状态", "标签", "我的评价", "我的简评", "私密", "更新时间", "制作地区"])
     
+    # 初始化成功日志文件
+    with open(success_log, 'w', newline='', encoding='utf-8') as success_file:
+        success_writer = csv.writer(success_file)
+        success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型"])
+    
+    # 初始化失败日志文件
+    with open(failure_log, 'w', newline='', encoding='utf-8') as failure_file:
+        failure_writer = csv.writer(failure_file)
+        failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型"])
+    
     # 读取输入CSV并逐条处理
     with open(input_csv, newline='', encoding='utf-8') as infile:
         reader = csv.DictReader(infile)
@@ -440,16 +550,29 @@ def convert_csv():
             print(f"\n处理进度: [{processed_items}/{total_items}]")
             
             try:
-                imdb_id = row["imdb"]  # 使用"imdb"字段
-                watched_at = row["watched_at"]  # 使用"watched_at"字段
-                csv_title = row["title"]  # 使用CSV中的标题作为备选
+                imdb_id = row.get("imdb", "")  # 使用"imdb"字段
+                trakt_id = row.get("trakt", "")  # 使用"trakt"字段
+                watched_at = row.get("watched_at", "")  # 使用"watched_at"字段
+                csv_title = row.get("title", "")  # 使用CSV中的标题作为备选
                 
-                print(f"正在处理 IMDB ID: {imdb_id} (标题: {csv_title})")
+                tmdb_data = None
+                media_type = "unknown"
+                country_name = "未知"
+                failure_reason = ""
                 
-                # 使用TMDB API获取数据
-                tmdb_data = get_tmdb_data(imdb_id)
+                # 首先检查是否有IMDB ID
+                if imdb_id and imdb_id.strip():
+                    print(f"正在使用IMDB ID处理: {imdb_id} (标题: {csv_title})")
+                    # 使用TMDB API获取数据
+                    tmdb_data = get_tmdb_data(imdb_id)
+                # 如果没有IMDB ID但有Trakt ID，则使用Trakt ID搜索
+                elif trakt_id and trakt_id.strip():
+                    print(f"IMDB ID为空，尝试使用Trakt ID: {trakt_id} (标题: {csv_title})")
+                    tmdb_data = get_trakt_data(trakt_id)
+                
                 if not tmdb_data:
-                    print(f"未找到 IMDB ID: {imdb_id} 的TMDB数据，尝试使用CSV中的标题。")
+                    failure_reason = "未找到TMDB数据"
+                    print(f"未找到作品的TMDB数据，尝试使用CSV中的标题。")
                     # 创建一个简单的数据结构作为备用
                     tmdb_data = {
                         "title": csv_title,
@@ -461,12 +584,16 @@ def convert_csv():
                         "media_type": "unknown"
                     }
                 
+                # 保存类型和地区信息用于日志
+                media_type = tmdb_data["media_type"]
+                country_name = tmdb_data["country_name"]
+                
                 # 获取日文标题
                 japanese_title = get_japanese_title(tmdb_data)
                 print(f"获取到的标题信息: 英文='{tmdb_data['title']}', 日文='{japanese_title}', 制作地区='{tmdb_data['country_name']}'")
                 
                 # 搜索Bangumi
-                bangumi_id, bgm_jp_title, bgm_cn_title, bgm_air_date = search_bangumi(
+                bangumi_id, bgm_jp_title, bgm_cn_title, bgm_air_date, similarity = search_bangumi(
                     tmdb_data["title"],
                     japanese_title,
                     tmdb_data["released"],
@@ -477,15 +604,23 @@ def convert_csv():
                     print(f"未找到 Bangumi 匹配项: {tmdb_data['title']}，尝试使用CSV中的标题。")
                     # 尝试使用CSV中的标题进行搜索
                     if csv_title != tmdb_data["title"]:
-                        bangumi_id, bgm_jp_title, bgm_cn_title, bgm_air_date = search_bangumi(
+                        bangumi_id, bgm_jp_title, bgm_cn_title, bgm_air_date, similarity = search_bangumi(
                             csv_title,
                             None,
                             tmdb_data["released"],
                             tmdb_data["year"]
                         )
                 
+
                 if not bangumi_id:
-                    print(f"仍未找到 Bangumi 匹配项，跳过。")
+                    failure_reason = failure_reason or "未找到Bangumi匹配项"
+                    print(f"仍未找到 Bangumi 匹配项，记录失败日志。")
+                    
+                    # 记录失败日志
+                    with open(failure_log, 'a', newline='', encoding='utf-8') as failure_file:
+                        failure_writer = csv.writer(failure_file)
+                        failure_writer.writerow([imdb_id, csv_title, failure_reason, country_name, media_type])
+                    
                     continue
                 
                 # 如果没有获取到Bangumi的放送日期，尝试获取更详细的信息
@@ -502,6 +637,20 @@ def convert_csv():
                     bgm_air_date = tmdb_data["released"]
                 
                 successful_matches += 1
+                
+                # 记录成功日志
+                with open(success_log, 'a', newline='', encoding='utf-8') as success_file:
+                    success_writer = csv.writer(success_file)
+                    success_writer.writerow([
+                        imdb_id, 
+                        csv_title, 
+                        bangumi_id, 
+                        bgm_jp_title, 
+                        bgm_cn_title, 
+                        f"{similarity:.3f}", 
+                        country_name, 
+                        media_type
+                    ])
                 
                 # 判断类型：如果是日本作品，默认为"动画"，否则为"电影"或"剧集"
                 if tmdb_data["country"] == "jp":
@@ -520,7 +669,7 @@ def convert_csv():
                 # 实时写入匹配结果到输出文件
                 with open(output_csv, 'a', newline='', encoding='utf-8') as outfile:
                     writer = csv.writer(outfile)
-                    writer.writerow([bangumi_id, category, bgm_cn_title, bgm_jp_title, bgm_air_date, "", "", "", "", "看过", "", "", "", "", formatted_watched_at, tmdb_data["country_name"]])
+                    writer.writerow([bangumi_id, category, bgm_cn_title, bgm_jp_title, bgm_air_date, "", "", "", "", watch_status, "", "", "", "", formatted_watched_at, tmdb_data["country_name"]])
                 
                 print(f"成功转换并写入: {csv_title} -> Bangumi ID: {bangumi_id}, 放送日期: {bgm_air_date}, 制作地区: {tmdb_data['country_name']}")
                 
@@ -528,63 +677,61 @@ def convert_csv():
                 current_match_rate = (successful_matches / processed_items * 100)
                 print(f"当前匹配率: {current_match_rate:.2f}% ({successful_matches}/{processed_items})")
                 
-                time.sleep(0.5)  # 避免 API 速率限制
+                time.sleep(0.3)  # 避免 API 速率限制
                 
             except Exception as e:
                 print(f"转换时出错: {str(e)}")
+                
+                # 记录失败日志
+                with open(failure_log, 'a', newline='', encoding='utf-8') as failure_file:
+                    failure_writer = csv.writer(failure_file)
+                    failure_writer.writerow([
+                        row.get('imdb', 'unknown'), 
+                        row.get('title', 'unknown'), 
+                        f"处理异常: {str(e)}", 
+                        row.get('country_name', '未知'), 
+                        row.get('media_type', 'unknown')
+                    ])
+                
                 # 记录错误，继续处理下一条
                 with open('error_log.txt', 'a', encoding='utf-8') as error_log:
                     error_log.write(f"处理失败 [{processed_items}/{total_items}]: IMDB ID={row.get('imdb', 'unknown')}, 标题={row.get('title', 'unknown')}, 错误: {str(e)}\n")
                     import traceback
                     error_log.write(traceback.format_exc() + "\n\n")
     
-    # 完成后的总结
+# 完成后的总结
     final_match_rate = (successful_matches / total_items * 100) if total_items > 0 else 0
-    print(f"\n转换完成！总条目: {total_items}, 成功匹配: {successful_matches}, 最终匹配率: {final_match_rate:.2f}%")
-    input("按任意键退出...")
-
-def create_default_config():
-    """创建默认配置文件"""
-    config = configparser.ConfigParser()
+    print(f"\n处理完成！")
+    print(f"- 总条目数: {total_items}")
+    print(f"- 成功匹配: {successful_matches}")
+    print(f"- 失败条目: {total_items - successful_matches}")
+    print(f"- 最终匹配率: {final_match_rate:.2f}%")
+    print(f"\n输出文件:")
+    print(f"- Bangumi导入CSV: {output_csv}")
+    print(f"- 成功匹配日志: {success_log}")
+    print(f"- 失败匹配日志: {failure_log}")
     
-    # 添加默认配置项
-    config['API'] = {
-        'tmdb_api_key': '请输入你的API Key(API密钥)'
-    }
-    config['Files'] = {
-        'input_csv': '请输入你的文件名.csv',
-        'output_csv': 'bangumi_export.csv'
-    }
-    config['Matching'] = {
-        'similarity_threshold': '2.5',  # 匹配阈值
-        'delay': '1'  # API请求之间的延迟秒数
-    }
-    
-    # 写入配置文件
-    with open('config.ini', 'w', encoding='utf-8') as configfile:
-        config.write(configfile)
-    
-    print("创建了默认配置文件 'config.ini'，请根据需要修改配置后再运行程序。")
-
-# 运行转换
-if __name__ == "__main__":
+    # 打开结果文件以便用户查看
     try:
-        # 创建错误日志文件
-        with open('error_log.txt', 'w', encoding='utf-8') as error_log:
-            error_log.write(f"Trakt To Bangumi 转换错误日志 - {datetime.datetime.now()}\n\n")
-        
-        # 如果没有配置文件，创建默认配置
-        if not os.path.exists('config.ini'):
-            create_default_config()
-            print("\n请修改配置文件后重新运行程序。")
-            input("按任意键退出...")
-        else:
-            convert_csv()
-    except Exception as e:
-        print(f"程序运行出错: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        with open('error_log.txt', 'a', encoding='utf-8') as error_log:
-            error_log.write(f"严重错误导致程序中断: {str(e)}\n")
-            error_log.write(traceback.format_exc())
-        input("按任意键退出...")
+        if os.name == 'nt':  # Windows
+            os.system(f'start "" "{output_csv}"')
+        elif os.name == 'posix':  # macOS 和 Linux
+            if os.system('which open > /dev/null') == 0:  # macOS
+                os.system(f'open "{output_csv}"')
+            else:  # Linux
+                os.system(f'xdg-open "{output_csv}" 2>/dev/null')
+    except:
+        pass
+    
+    print("\n处理完成。按任意键退出...")
+    input()
+
+if __name__ == "__main__":
+    print("欢迎使用 Trakt-to-Bangumi 转换工具 2.0")
+    print("本工具将把 Trakt 导出的观看记录转换为 Bangumi 可导入格式")
+    print("确保已在 config.ini 文件中设置了正确的 TMDB API Key 和文件路径")
+    print(f"当前观看状态设定为: {CONFIG['Settings']['watch_status']}")
+    print("可用的观看状态: 想看、看过、在看、搁置、抛弃")
+    print("-" * 60)
+    
+    convert_csv()
