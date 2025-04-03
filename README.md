@@ -22,11 +22,11 @@ pip install requests pandas
 
 * 导出历史列表中的所有Shows（剧集）为export_shows_history.csv：
 ```
-export_trakt.py -c config.ini -t shows -o export_shows_history.csv -l history
+python export_trakt.py -c config.ini -t shows -o export_shows_history.csv -l history
 ```
 * 导出历史列表中的所有Movies（电影）为export_movies_history.csv：
 ```
-export_trakt.py -c config.ini -t movies -o export_movies_history.csv -l history
+python export_trakt.py -c config.ini -t movies -o export_movies_history.csv -l history
 ```
 * 将导出后的文件放到本项目文件夹下并修改config.ini配置文件，已经标注了必填项和建议填写项
 * 启动``Trakt-to-Bangumi.py``开始转换，然后耐心等待（内容为实时写入如有不便可退出）
