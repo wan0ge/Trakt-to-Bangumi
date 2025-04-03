@@ -8,30 +8,71 @@ import json
 import re
 import configparser
 
-def load_config():
-    """从配置文件加载配置"""
+# 定义配置文件路径
+CONFIG_PATH = 'config.ini'
+
+# 读取配置文件
+def read_config():
     config = configparser.ConfigParser()
     
-    # 检查配置文件是否存在，如果不存在则创建默认配置
-    if not os.path.exists('config.ini'):
-        print("未找到配置文件，创建默认配置文件 'config.ini'")
-        config['API'] = {
-            'tmdb_api_key': '请输入你的API Key(API密钥)',
-            'trakt_client_id': '请输入你的Trakt Client ID'  # 新增Trakt API配置
-        }
-        config['Files'] = {
-            'input_csv': '请输入你的文件名.csv',
-            'output_csv': 'bangumi_export.csv'
-        }
-        config['Settings'] = {
-            'watch_status': '看过'  # 添加默认的观看状态设置
-        }
+    # 如果配置文件不存在，创建默认配置
+    if not os.path.exists(CONFIG_PATH):
+        # 使用多行字符串来保留注释
+        config_content = '''\
+#此文件用于 Trakt-to-Bangumi 转换脚本和 Bangumi2Bangumi-Csv版 导入脚本的设置
+[API]
+##必填项
+##TMDB API
+## https://www.themoviedb.org/settings/api
+tmdb_api_key = 请输入你的API Key(API密钥)
+
+##Trakt API
+##当csv中imdb id为空时将使用此项(Trakt API)反查TMDB id进行搜索匹配
+##非必填，但建议填写
+## https://trakt.tv/oauth/applications
+trakt_client_id = 请输入你的Trakt Client ID
+
+[Files]
+##必填项
+##输入文件名
+input_csv = 请输入你的文件名.csv
+
+##输出文件名
+output_csv = bangumi_export.csv
+
+[Settings]
+##自定义最终文件状态，决定最终导入时的状态
+##可选：在看/在读/在玩/在听/看过/读过/玩过/听过/搁置/抛弃
+watch_status = 看过
+
+
+[BangumiMigrate]
+##必填项
+##Bangumi API访问令牌
+## https://next.bgm.tv/demo/access-token
+access_token = 请输入你的Bangumi访问令牌
+
+##必填项
+##Bangumi导入文件名
+input_csv = bangumi_export.csv
+
+##API请求间隔时间(秒)
+wait_time = 2
+
+##true false
+##是否标记全部集数为看过（使用的是"看到"）
+##为true时将最后一集标记"看到"实现全部标记看过
+##为false时使用csv文件中的"看到"数值标记
+auto_complete = true
+
+'''
         
-        with open('config.ini', 'w', encoding='utf-8') as configfile:
-            config.write(configfile)
+        # 直接写入包含注释的完整文件内容
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as configfile:
+            configfile.write(config_content)
     
     # 读取配置文件
-    config.read('config.ini', encoding='utf-8')
+    config.read(CONFIG_PATH, encoding='utf-8')
     
     # 确保Settings部分存在
     if 'Settings' not in config:
@@ -40,13 +81,13 @@ def load_config():
     # 确保watch_status设置存在
     if 'watch_status' not in config['Settings']:
         config['Settings']['watch_status'] = '看过'
-        with open('config.ini', 'w', encoding='utf-8') as configfile:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as configfile:
             config.write(configfile)
     
     return config
 
 # 全局配置对象
-CONFIG = load_config()
+CONFIG = read_config()
 
 def get_trakt_data(trakt_id):
     """通过Trakt API获取影视数据"""
@@ -320,7 +361,7 @@ def _search_bangumi_api(encoded_title):
     url = f"https://api.bgm.tv/search/subject/{encoded_title}?type=2,6&responseGroup=small"
     
     headers = {
-        "User-Agent": "TMDBToBangumi/1.0",
+        "User-Agent": "wan0ge/Trakt-to-Bangumi(https://github.com/wan0ge/Trakt-to-Bangumi)",
         "Accept": "application/json"
     }
     
@@ -475,7 +516,7 @@ def get_bangumi_details(bgm_id):
     url = f"https://api.bgm.tv/subject/{bgm_id}?responseGroup=large"
     
     headers = {
-        "User-Agent": "TMDBToBangumi/1.0",
+        "User-Agent": "wan0ge/Trakt-to-Bangumi(https://github.com/wan0ge/Trakt-to-Bangumi)",
         "Accept": "application/json"
     }
     
@@ -494,7 +535,7 @@ def get_bangumi_details(bgm_id):
     return None
 
 def convert_csv():
-    """转换CSV文件为Bangumi导入格式，实时写入结果"""
+    """转换CSV文件为Bangumi导入格式，实时写入结果，并跳过重复项"""
     # 从配置文件读取输入输出文件名
     input_csv = CONFIG['Files']['input_csv']
     output_csv = CONFIG['Files']['output_csv']
@@ -522,21 +563,53 @@ def convert_csv():
         print(f"读取CSV文件出错: {str(e)}")
         total_items = 0
     
-    # 初始化输出文件，写入表头
-    with open(output_csv, 'w', newline='', encoding='utf-8') as outfile:
-        writer = csv.writer(outfile)
-        # 修改CSV表头，增加制作地区字段
-        writer.writerow(["ID", "类型", "中文", "日文", "放送", "排名", "评分", "话数", "看到", "状态", "标签", "我的评价", "我的简评", "私密", "更新时间", "制作地区"])
+    # 读取已存在的输出文件，收集已处理的ID
+    processed_ids = set()
+    if os.path.exists(output_csv):
+        try:
+            with open(output_csv, newline='', encoding='utf-8') as existing_file:
+                reader = csv.reader(existing_file)
+                next(reader)  # 跳过表头
+                for row in reader:
+                    if row and row[0]:  # 确保有ID
+                        processed_ids.add(row[0])
+            print(f"从输出文件中读取到 {len(processed_ids)} 个已处理的ID")
+        except Exception as e:
+            print(f"读取已存在的输出文件时出错: {str(e)}")
     
-    # 初始化成功日志文件
-    with open(success_log, 'w', newline='', encoding='utf-8') as success_file:
-        success_writer = csv.writer(success_file)
-        success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型"])
+    # 读取已存在的成功日志，收集已处理的IMDB ID
+    processed_imdb_ids = set()
+    skipped_items = 0
+    if os.path.exists(success_log):
+        try:
+            with open(success_log, newline='', encoding='utf-8') as existing_log:
+                reader = csv.reader(existing_log)
+                next(reader)  # 跳过表头
+                for row in reader:
+                    if row and row[0]:  # 确保有IMDB ID
+                        processed_imdb_ids.add(row[0])
+            print(f"从成功日志中读取到 {len(processed_imdb_ids)} 个已处理的IMDB ID")
+        except Exception as e:
+            print(f"读取已存在的成功日志时出错: {str(e)}")
     
-    # 初始化失败日志文件
-    with open(failure_log, 'w', newline='', encoding='utf-8') as failure_file:
-        failure_writer = csv.writer(failure_file)
-        failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型"])
+    # 初始化输出文件，如果不存在则写入表头
+    if not os.path.exists(output_csv):
+        with open(output_csv, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            # 修改CSV表头，增加制作地区字段
+            writer.writerow(["ID", "类型", "中文", "日文", "放送", "排名", "评分", "话数", "看到", "状态", "标签", "我的评价", "我的简评", "私密", "更新时间", "制作地区"])
+    
+    # 初始化成功日志文件，如果不存在则写入表头
+    if not os.path.exists(success_log):
+        with open(success_log, 'w', newline='', encoding='utf-8') as success_file:
+            success_writer = csv.writer(success_file)
+            success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型"])
+    
+    # 初始化失败日志文件，如果不存在则写入表头
+    if not os.path.exists(failure_log):
+        with open(failure_log, 'w', newline='', encoding='utf-8') as failure_file:
+            failure_writer = csv.writer(failure_file)
+            failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型"])
     
     # 读取输入CSV并逐条处理
     with open(input_csv, newline='', encoding='utf-8') as infile:
@@ -547,11 +620,19 @@ def convert_csv():
         
         for row in reader:
             processed_items += 1
-            print(f"\n处理进度: [{processed_items}/{total_items}]")
             
             try:
                 imdb_id = row.get("imdb", "")  # 使用"imdb"字段
                 trakt_id = row.get("trakt", "")  # 使用"trakt"字段
+                
+                # 检查是否已处理过该IMDB ID
+                if imdb_id and imdb_id in processed_imdb_ids:
+                    print(f"\n处理进度: [{processed_items}/{total_items}] - 跳过已处理的IMDB ID: {imdb_id}")
+                    skipped_items += 1
+                    continue
+                
+                print(f"\n处理进度: [{processed_items}/{total_items}]")
+                
                 watched_at = row.get("watched_at", "")  # 使用"watched_at"字段
                 csv_title = row.get("title", "")  # 使用CSV中的标题作为备选
                 
@@ -611,7 +692,6 @@ def convert_csv():
                             tmdb_data["year"]
                         )
                 
-
                 if not bangumi_id:
                     failure_reason = failure_reason or "未找到Bangumi匹配项"
                     print(f"仍未找到 Bangumi 匹配项，记录失败日志。")
@@ -620,6 +700,31 @@ def convert_csv():
                     with open(failure_log, 'a', newline='', encoding='utf-8') as failure_file:
                         failure_writer = csv.writer(failure_file)
                         failure_writer.writerow([imdb_id, csv_title, failure_reason, country_name, media_type])
+                    
+                    continue
+                
+                # 检查是否已处理过该Bangumi ID
+                if bangumi_id in processed_ids:
+                    print(f"跳过已处理的Bangumi ID: {bangumi_id}")
+                    skipped_items += 1
+                    
+                    # 更新成功日志以记录已跳过的条目
+                    with open(success_log, 'a', newline='', encoding='utf-8') as success_file:
+                        success_writer = csv.writer(success_file)
+                        success_writer.writerow([
+                            imdb_id, 
+                            csv_title, 
+                            bangumi_id, 
+                            bgm_jp_title, 
+                            bgm_cn_title, 
+                            f"{similarity:.3f}", 
+                            country_name, 
+                            media_type
+                        ])
+                    
+                    # 将IMDB ID添加到已处理集合中
+                    if imdb_id:
+                        processed_imdb_ids.add(imdb_id)
                     
                     continue
                 
@@ -652,6 +757,11 @@ def convert_csv():
                         media_type
                     ])
                 
+                # 将ID添加到已处理集合中
+                processed_ids.add(bangumi_id)
+                if imdb_id:
+                    processed_imdb_ids.add(imdb_id)
+                
                 # 判断类型：如果是日本作品，默认为"动画"，否则为"电影"或"剧集"
                 if tmdb_data["country"] == "jp":
                     category = "动画"
@@ -674,8 +784,8 @@ def convert_csv():
                 print(f"成功转换并写入: {csv_title} -> Bangumi ID: {bangumi_id}, 放送日期: {bgm_air_date}, 制作地区: {tmdb_data['country_name']}")
                 
                 # 显示当前进度和匹配率
-                current_match_rate = (successful_matches / processed_items * 100)
-                print(f"当前匹配率: {current_match_rate:.2f}% ({successful_matches}/{processed_items})")
+                current_match_rate = (successful_matches / (processed_items - skipped_items) * 100) if (processed_items - skipped_items) > 0 else 0
+                print(f"当前匹配率: {current_match_rate:.2f}% ({successful_matches}/{processed_items - skipped_items})")
                 
                 time.sleep(0.3)  # 避免 API 速率限制
                 
@@ -698,13 +808,15 @@ def convert_csv():
                     error_log.write(f"处理失败 [{processed_items}/{total_items}]: IMDB ID={row.get('imdb', 'unknown')}, 标题={row.get('title', 'unknown')}, 错误: {str(e)}\n")
                     import traceback
                     error_log.write(traceback.format_exc() + "\n\n")
-    
-# 完成后的总结
-    final_match_rate = (successful_matches / total_items * 100) if total_items > 0 else 0
+                    
+    # 完成后的总结
+    final_match_rate = (successful_matches / (total_items - skipped_items) * 100) if (total_items - skipped_items) > 0 else 0
     print(f"\n处理完成！")
     print(f"- 总条目数: {total_items}")
+    print(f"- 跳过条目: {skipped_items}")
+    print(f"- 实际处理: {total_items - skipped_items}")
     print(f"- 成功匹配: {successful_matches}")
-    print(f"- 失败条目: {total_items - successful_matches}")
+    print(f"- 失败条目: {total_items - skipped_items - successful_matches}")
     print(f"- 最终匹配率: {final_match_rate:.2f}%")
     print(f"\n输出文件:")
     print(f"- Bangumi导入CSV: {output_csv}")
