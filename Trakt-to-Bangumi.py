@@ -915,7 +915,7 @@ def convert_csv():
                     success_writer = csv.writer(success_file)
                     success_writer.writerow([
                         imdb_id, 
-						trakt_id, 
+                        trakt_id, 
                         csv_title, 
                         bangumi_id, 
                         bgm_jp_title, 
