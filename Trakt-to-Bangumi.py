@@ -139,6 +139,15 @@ def make_api_request(url, headers=None, timeout=10):
             raise requests.exceptions.RequestException(f"服务器错误: {response.status_code}")
         return None  # 客户端错误或其他错误，不重试
     
+    # 检查内容类型
+    content_type = response.headers.get('Content-Type', '')
+    if 'application/json' not in content_type.lower():
+        print(f"API返回了非JSON格式 (Content-Type: {content_type})")
+        # 如果响应是HTML，给出更明确的提示
+        if response.text.strip().startswith('<!DOCTYPE html>') or response.text.strip().startswith('<html'):
+            print("API返回了HTML页面而不是JSON数据，可能API端点已更改或服务暂时不可用")
+        return None
+    
     # 检查响应内容是否为空
     if not response.text.strip():
         print("API返回空响应，可能是搜索条件无效")
@@ -456,22 +465,59 @@ def _search_bangumi_api(encoded_title):
     }
     
     try:
-        data = make_api_request(url, headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         
-        if data is None:
-            return []  # 请求失败，返回空列表
+        # 检查响应状态码
+        if response.status_code != 200:
+            print(f"Bangumi API返回了非200状态码: {response.status_code}")
+            return []
+            
+        # 检查内容类型
+        content_type = response.headers.get('Content-Type', '')
+        if 'application/json' not in content_type.lower():
+            print(f"Bangumi API返回了非JSON格式 (Content-Type: {content_type})")
+            return []
+            
+        # 检查是否为空响应
+        if not response.text or response.text.isspace():
+            print(f"Bangumi API搜索无结果: '{encoded_title}'")
+            return []
+            
+        # 尝试解析JSON
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            # 如果返回的不是有效的JSON格式
+            if response.text.strip().startswith('<!DOCTYPE html>') or response.text.strip().startswith('<html'):
+                print(f"Bangumi API返回了HTML而不是JSON (可能是网站而不是API响应)")
+            else:
+                print(f"Bangumi API返回了无效的JSON格式: {str(e)}")
+            return []
         
-        # 根据返回结构提取结果列表
+        # 处理有效的JSON响应
         if isinstance(data, dict) and "list" in data:
             return data["list"]
         elif isinstance(data, list):
             return data
         else:
-            print(f"Bangumi API返回了意外的数据结构：{data}")
+            # 空结果但格式正确
+            if not data:
+                print(f"Bangumi API搜索无结果: '{encoded_title}'")
+                return []
+            print(f"Bangumi API返回了意外的数据结构：{type(data)}")
             return []
             
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"Bangumi API请求出错: {str(e)}")
+        return []
+    except Exception as e:
+        print(f"处理Bangumi API响应时出错: {str(e)}")
+        return []
+            
+    except Exception as e:
+        # Only show generic error for non-JSON parsing errors
+        if not isinstance(e, json.JSONDecodeError):
+            print(f"Bangumi API请求出错: {str(e)}")
         return []
 
 def _process_bangumi_results(results, title, japanese_title, released, year):
