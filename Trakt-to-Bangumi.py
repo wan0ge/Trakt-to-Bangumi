@@ -7,6 +7,7 @@ import urllib.parse
 import json
 import re
 import configparser
+import functools
 
 # 定义配置文件路径
 CONFIG_PATH = 'config.ini'
@@ -89,6 +90,70 @@ auto_complete = true
 # 全局配置对象
 CONFIG = read_config()
 
+def retry_on_network_error(max_retries=2, base_delay=1):
+    """
+    装饰器函数，用于在网络错误时进行重试
+    :param max_retries: 最大重试次数
+    :param base_delay: 基础延迟时间（秒）
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except (requests.exceptions.Timeout, 
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.RequestException) as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        print(f"网络错误，已达到最大重试次数 {max_retries}，放弃尝试: {str(e)}")
+                        raise
+                    
+                    wait_time = base_delay * (2 ** (retries - 1))  # 指数退避策略
+                    print(f"网络错误: {str(e)}，将在 {wait_time} 秒后重试 ({retries}/{max_retries-1})...")
+                    time.sleep(wait_time)
+            return None
+        return wrapper
+    return decorator
+
+@retry_on_network_error(max_retries=3, base_delay=1)
+def make_api_request(url, headers=None, timeout=10):
+    """
+    发送API请求并处理响应
+    :param url: 请求URL
+    :param headers: 请求头
+    :param timeout: 超时时间（秒）
+    :return: 响应JSON或None
+    """
+    if headers is None:
+        headers = {}
+    
+    response = requests.get(url, headers=headers, timeout=timeout)
+    
+    # 检查状态码
+    if response.status_code != 200:
+        print(f"API请求失败，状态码: {response.status_code}")
+        if response.status_code >= 500:  # 服务器错误，可能是临时的
+            raise requests.exceptions.RequestException(f"服务器错误: {response.status_code}")
+        return None  # 客户端错误或其他错误，不重试
+    
+    # 检查响应内容是否为空
+    if not response.text.strip():
+        print("API返回空响应，可能是搜索条件无效")
+        return None  # 空响应，可能是合法的"无结果"，不重试
+    
+    try:
+        data = response.json()
+        return data
+    except json.JSONDecodeError as e:
+        print(f"JSON解析错误: {str(e)}, 响应内容: {response.text[:100]}...")
+        raise requests.exceptions.RequestException(f"JSON解析错误: {str(e)}")
+    
+    # 避免API速率限制
+    time.sleep(0.3)
+
 def get_trakt_data(trakt_id):
     """通过Trakt API获取影视数据"""
     # 从配置文件获取Trakt Client ID
@@ -100,48 +165,46 @@ def get_trakt_data(trakt_id):
     
     url = f"https://api.trakt.tv/shows/{trakt_id}" if trakt_id else None
     
-    # 如果无法确定类型（电影还是剧集），先尝试剧集，然后尝试电影
-    if url:
-        headers = {
-            "Content-Type": "application/json",
-            "trakt-api-version": "2",
-            "trakt-api-key": trakt_client_id
-        }
+    if not url:
+        return None
         
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                show_data = response.json()
-                print(f"成功获取剧集数据: {show_data.get('title')}")
+    headers = {
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": trakt_client_id
+    }
+    
+    try:
+        # 尝试获取剧集数据
+        show_data = make_api_request(url, headers, timeout=10)
+        
+        if show_data:
+            print(f"成功获取剧集数据: {show_data.get('title')}")
+            
+            # 从Trakt获取TMDB ID
+            tmdb_id = show_data.get("ids", {}).get("tmdb")
+            if tmdb_id:
+                # 使用TMDB ID获取详细信息
+                return get_tmdb_details(tmdb_id, "tv")
+            else:
+                print(f"Trakt剧集数据中没有TMDB ID")
+        else:
+            # 尝试获取电影数据
+            movie_url = f"https://api.trakt.tv/movies/{trakt_id}"
+            movie_data = make_api_request(movie_url, headers, timeout=10)
+            
+            if movie_data:
+                print(f"成功获取电影数据: {movie_data.get('title')}")
                 
                 # 从Trakt获取TMDB ID
-                tmdb_id = show_data.get("ids", {}).get("tmdb")
+                tmdb_id = movie_data.get("ids", {}).get("tmdb")
                 if tmdb_id:
                     # 使用TMDB ID获取详细信息
-                    return get_tmdb_details(tmdb_id, "tv")
+                    return get_tmdb_details(tmdb_id, "movie")
                 else:
-                    print(f"Trakt剧集数据中没有TMDB ID")
-            elif response.status_code == 404:
-                # 尝试获取电影数据
-                url = f"https://api.trakt.tv/movies/{trakt_id}"
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    movie_data = response.json()
-                    print(f"成功获取电影数据: {movie_data.get('title')}")
-                    
-                    # 从Trakt获取TMDB ID
-                    tmdb_id = movie_data.get("ids", {}).get("tmdb")
-                    if tmdb_id:
-                        # 使用TMDB ID获取详细信息
-                        return get_tmdb_details(tmdb_id, "movie")
-                    else:
-                        print(f"Trakt电影数据中没有TMDB ID")
-                else:
-                    print(f"Trakt API请求失败: {response.status_code}")
-            else:
-                print(f"Trakt API请求失败: {response.status_code}")
-        except Exception as e:
-            print(f"Trakt API请求失败: {str(e)}")
+                    print(f"Trakt电影数据中没有TMDB ID")
+    except Exception as e:
+        print(f"Trakt API请求失败: {str(e)}")
     
     return None
 
@@ -152,30 +215,32 @@ def get_tmdb_data(imdb_id):
     url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
     
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # TMDB的find接口会返回电影或电视剧的结果
-            movie_results = data.get("movie_results", [])
-            tv_results = data.get("tv_results", [])
+        data = make_api_request(url, timeout=10)
+        
+        if data is None:
+            print(f"在TMDB中找不到imdb ID为{imdb_id}的作品")
+            return None
             
-            if movie_results:
-                result = movie_results[0]
-                tmdb_id = result.get("id")
-                # 获取更详细的电影数据
-                return get_tmdb_details(tmdb_id, "movie")
-            elif tv_results:
-                result = tv_results[0]
-                tmdb_id = result.get("id")
-                # 获取更详细的电视剧数据
-                return get_tmdb_details(tmdb_id, "tv")
-            else:
-                print(f"在TMDB中找不到imdb ID为{imdb_id}的作品")
-                return None
+        # TMDB的find接口会返回电影或电视剧的结果
+        movie_results = data.get("movie_results", [])
+        tv_results = data.get("tv_results", [])
+        
+        if movie_results:
+            result = movie_results[0]
+            tmdb_id = result.get("id")
+            # 获取更详细的电影数据
+            return get_tmdb_details(tmdb_id, "movie")
+        elif tv_results:
+            result = tv_results[0]
+            tmdb_id = result.get("id")
+            # 获取更详细的电视剧数据
+            return get_tmdb_details(tmdb_id, "tv")
+        else:
+            print(f"在TMDB中找不到imdb ID为{imdb_id}的作品")
+            return None
     except Exception as e:
         print(f"TMDB API请求失败: {str(e)}")
-    
-    return None
+        return None
 
 def get_tmdb_details(tmdb_id, media_type):
     """获取TMDB详细信息"""
@@ -183,44 +248,44 @@ def get_tmdb_details(tmdb_id, media_type):
     url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={tmdb_api_key}&append_to_response=release_dates,content_ratings"
     
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
+        data = make_api_request(url, timeout=10)
+        
+        if data is None:
+            return None
             
-            # 获取发布日期
-            released = None
-            if media_type == "movie":
-                released = data.get("release_date")
-            else:  # tv
-                released = data.get("first_air_date")
-            
-            # 获取制作国家
-            country = "unknown"
-            country_name = "未知"
-            production_countries = data.get("production_countries", [])
-            if production_countries:
-                country = production_countries[0].get("iso_3166_1", "unknown").lower()
-                country_name = production_countries[0].get("name", "未知")
-            
-            # 获取年份
-            year = None
-            if released:
-                year = int(released.split("-")[0])
-            
-            return {
-                "title": data.get("title") if media_type == "movie" else data.get("name"),
-                "released": released,
-                "country": country,
-                "country_name": country_name,
-                "year": year,
-                "tmdb_id": tmdb_id,
-                "media_type": media_type,
-                "imdb_id": data.get("imdb_id")
-            }
+        # 获取发布日期
+        released = None
+        if media_type == "movie":
+            released = data.get("release_date")
+        else:  # tv
+            released = data.get("first_air_date")
+        
+        # 获取制作国家
+        country = "unknown"
+        country_name = "未知"
+        production_countries = data.get("production_countries", [])
+        if production_countries:
+            country = production_countries[0].get("iso_3166_1", "unknown").lower()
+            country_name = production_countries[0].get("name", "未知")
+        
+        # 获取年份
+        year = None
+        if released:
+            year = int(released.split("-")[0])
+        
+        return {
+            "title": data.get("title") if media_type == "movie" else data.get("name"),
+            "released": released,
+            "country": country,
+            "country_name": country_name,
+            "year": year,
+            "tmdb_id": tmdb_id,
+            "media_type": media_type,
+            "imdb_id": data.get("imdb_id")
+        }
     except Exception as e:
         print(f"获取TMDB详情失败: {str(e)}")
-    
-    return None
+        return None
 
 def get_japanese_title(tmdb_data):
     """通过TMDB API获取日文原名"""
@@ -255,23 +320,27 @@ def get_tmdb_japanese_title(tmdb_id, media_type):
     
     url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={tmdb_api_key}&language=ja"
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # 尝试获取日文标题
-            japanese_title = data.get("title") if media_type == "movie" else data.get("name")
-            if japanese_title and is_japanese(japanese_title):
-                return japanese_title
+        data = make_api_request(url, timeout=10)
+        
+        if data is None:
+            return None
             
-            # 如果主标题不是日文，检查alternative_titles
-            alt_titles_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/alternative_titles?api_key={tmdb_api_key}"
-            alt_response = requests.get(alt_titles_url, timeout=10)
-            if alt_response.status_code == 200:
-                alt_data = alt_response.json()
-                titles_key = "titles" if media_type == "movie" else "results"
-                for title_obj in alt_data.get(titles_key, []):
-                    if title_obj.get("iso_3166_1") == "JP":
-                        return title_obj.get("title") if media_type == "movie" else title_obj.get("name")
+        # 尝试获取日文标题
+        japanese_title = data.get("title") if media_type == "movie" else data.get("name")
+        if japanese_title and is_japanese(japanese_title):
+            return japanese_title
+        
+        # 如果主标题不是日文，检查alternative_titles
+        alt_titles_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/alternative_titles?api_key={tmdb_api_key}"
+        alt_data = make_api_request(alt_titles_url, timeout=10)
+        
+        if alt_data is None:
+            return None
+            
+        titles_key = "titles" if media_type == "movie" else "results"
+        for title_obj in alt_data.get(titles_key, []):
+            if title_obj.get("iso_3166_1") == "JP":
+                return title_obj.get("title") if media_type == "movie" else title_obj.get("name")
     except Exception as e:
         print(f"TMDB API请求失败: {str(e)}")
     
@@ -287,12 +356,27 @@ def search_bangumi(title, japanese_title, released, year=None):
     """通过 Bangumi API 搜索匹配的条目，优先使用日文标题"""
     results = []
     
+    # 预处理标题，替换特殊符号为空格
+    def clean_title(title_str):
+        if not title_str:
+            return title_str
+        # 替换特殊符号为空格
+        cleaned = re.sub(r'[/\\:*?"<>|&#+\-\.,;=@!%\(\)\[\]\{\}]', ' ', title_str)
+        # 合并多个空格为单个空格
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned
+    
     # 1. 首先尝试使用日文标题搜索
     if japanese_title and japanese_title != title:
-        encoded_jp_title = urllib.parse.quote(japanese_title)
+        # 处理标题中的特殊符号
+        clean_jp_title = clean_title(japanese_title)
+        encoded_jp_title = urllib.parse.quote(clean_jp_title)
+        
+        print(f"使用清理后的日文标题搜索: '{clean_jp_title}'")
         jp_results = _search_bangumi_api(encoded_jp_title)
+        
         if jp_results:
-            print(f"使用日文标题'{japanese_title}'搜索到 {len(jp_results)} 个结果")
+            print(f"使用日文标题'{clean_jp_title}'搜索到 {len(jp_results)} 个结果")
             results.extend(jp_results)
         
         # 尝试日文标题拆分简化搜索
@@ -311,8 +395,9 @@ def search_bangumi(title, japanese_title, released, year=None):
                 # 有些日文标题格式是"主标题 副标题"
                 main_jp_title = japanese_title.split(' ')[0]
             
-            main_jp_title = main_jp_title.strip()
-            if main_jp_title != japanese_title:
+            main_jp_title = clean_title(main_jp_title.strip())
+            
+            if main_jp_title != clean_jp_title:
                 print(f"尝试使用简化日文标题: {main_jp_title}")
                 encoded_simple_jp_title = urllib.parse.quote(main_jp_title)
                 simple_jp_results = _search_bangumi_api(encoded_simple_jp_title)
@@ -321,10 +406,14 @@ def search_bangumi(title, japanese_title, released, year=None):
                     results.extend(simple_jp_results)
     
     # 2. 然后使用英文标题搜索
-    encoded_title = urllib.parse.quote(title)
+    clean_en_title = clean_title(title)
+    encoded_title = urllib.parse.quote(clean_en_title)
+    
+    print(f"使用清理后的英文标题搜索: '{clean_en_title}'")
     eng_results = _search_bangumi_api(encoded_title)
+    
     if eng_results:
-        print(f"使用英文标题'{title}'搜索到 {len(eng_results)} 个结果")
+        print(f"使用英文标题'{clean_en_title}'搜索到 {len(eng_results)} 个结果")
         results.extend(eng_results)
     
     # 3. 如果仍无结果，尝试英文标题拆分
@@ -341,8 +430,9 @@ def search_bangumi(title, japanese_title, released, year=None):
             if len(words) > 2:  # 至少有三个词的标题才考虑简化
                 main_title = ' '.join(words[:2])  # 取前两个词
         
-        main_title = main_title.strip()
-        if main_title != title and len(main_title) > 3:  # 确保简化后的标题不会太短
+        main_title = clean_title(main_title.strip())
+        
+        if main_title != clean_en_title and len(main_title) > 3:  # 确保简化后的标题不会太短
             print(f"尝试使用简化英文标题: {main_title}")
             encoded_simple_title = urllib.parse.quote(main_title)
             simple_results = _search_bangumi_api(encoded_simple_title)
@@ -366,45 +456,23 @@ def _search_bangumi_api(encoded_title):
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        data = make_api_request(url, headers, timeout=10)
         
-        if response.status_code == 200:
-            # 检查响应内容是否为空
-            if not response.text.strip():
-                print(f"Bangumi API返回空响应，可能是API速率限制或搜索条件无效：{encoded_title}")
-                return []
-                
-            try:
-                data = response.json()
-                
-                # 根据返回结构提取结果列表
-                if isinstance(data, dict) and "list" in data:
-                    return data["list"]
-                elif isinstance(data, list):
-                    return data
-                else:
-                    print(f"Bangumi API返回了意外的数据结构：{data}")
-                    return []
-                    
-            except json.JSONDecodeError as e:
-                print(f"JSON解析错误: {str(e)}, 响应内容: {response.text[:100]}...")
-                return []
+        if data is None:
+            return []  # 请求失败，返回空列表
+        
+        # 根据返回结构提取结果列表
+        if isinstance(data, dict) and "list" in data:
+            return data["list"]
+        elif isinstance(data, list):
+            return data
         else:
-            print(f"Bangumi API请求失败，状态码: {response.status_code}")
+            print(f"Bangumi API返回了意外的数据结构：{data}")
             return []
-        
-        # 避免API速率限制
-        time.sleep(0.3)  # 增加间隔时间
-        
-    except requests.exceptions.Timeout:
-        print(f"Bangumi API请求超时")
-        time.sleep(2)  # 超时后增加更长的等待时间
-        return []
+            
     except Exception as e:
         print(f"Bangumi API请求出错: {str(e)}")
         return []
-    
-    return []
 
 def _process_bangumi_results(results, title, japanese_title, released, year):
     """处理Bangumi搜索结果并找出最佳匹配"""
@@ -521,18 +589,11 @@ def get_bangumi_details(bgm_id):
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return data
-        
-        # 避免API速率限制
-        time.sleep(0.3)
+        data = make_api_request(url, headers, timeout=10)
+        return data
     except Exception as e:
         print(f"获取Bangumi详情失败: {str(e)}")
-    
-    return None
+        return None
 
 def convert_csv():
     """转换CSV文件为Bangumi导入格式，实时写入结果，并跳过重复项"""
@@ -563,8 +624,8 @@ def convert_csv():
         print(f"读取CSV文件出错: {str(e)}")
         total_items = 0
     
-    # 读取已存在的输出文件，收集已处理的ID
-    processed_ids = set()
+    # 读取已存在的输出文件，收集已处理的Bangumi ID
+    processed_bangumi_ids = set()
     if os.path.exists(output_csv):
         try:
             with open(output_csv, newline='', encoding='utf-8') as existing_file:
@@ -572,25 +633,66 @@ def convert_csv():
                 next(reader)  # 跳过表头
                 for row in reader:
                     if row and row[0]:  # 确保有ID
-                        processed_ids.add(row[0])
-            print(f"从输出文件中读取到 {len(processed_ids)} 个已处理的ID")
+                        processed_bangumi_ids.add(row[0])
+            print(f"从输出文件中读取到 {len(processed_bangumi_ids)} 个已处理的Bangumi ID")
         except Exception as e:
             print(f"读取已存在的输出文件时出错: {str(e)}")
     
-    # 读取已存在的成功日志，收集已处理的IMDB ID
+    # 读取已存在的成功日志，收集已处理的IMDB ID和Trakt ID
     processed_imdb_ids = set()
+    processed_trakt_ids = set()  # 新增: 记录已处理的Trakt ID
     skipped_items = 0
+    
     if os.path.exists(success_log):
         try:
             with open(success_log, newline='', encoding='utf-8') as existing_log:
                 reader = csv.reader(existing_log)
-                next(reader)  # 跳过表头
+                headers = next(reader)  # 读取表头
+                
+                # 检查表头是否包含Trakt ID列
+                has_trakt_column = "原Trakt ID" in headers
+                trakt_index = headers.index("原Trakt ID") if has_trakt_column else -1
+                
                 for row in reader:
-                    if row and row[0]:  # 确保有IMDB ID
-                        processed_imdb_ids.add(row[0])
+                    if row and len(row) > 0:  # 确保有数据
+                        # 添加IMDB ID到已处理集合
+                        if row[0]:  # IMDB ID
+                            processed_imdb_ids.add(row[0])
+                        
+                        # 添加Trakt ID到已处理集合(如果表头包含Trakt ID列)
+                        if has_trakt_column and trakt_index >= 0 and trakt_index < len(row) and row[trakt_index]:
+                            processed_trakt_ids.add(row[trakt_index])
+                            
             print(f"从成功日志中读取到 {len(processed_imdb_ids)} 个已处理的IMDB ID")
+            print(f"从成功日志中读取到 {len(processed_trakt_ids)} 个已处理的Trakt ID")
         except Exception as e:
             print(f"读取已存在的成功日志时出错: {str(e)}")
+    
+    # 读取已存在的失败日志，也将其中的IMDB ID和Trakt ID加入已处理集合
+    if os.path.exists(failure_log):
+        try:
+            with open(failure_log, newline='', encoding='utf-8') as existing_log:
+                reader = csv.reader(existing_log)
+                headers = next(reader)  # 读取表头
+                
+                # 检查表头是否包含Trakt ID列
+                has_trakt_column = "原Trakt ID" in headers
+                trakt_index = headers.index("原Trakt ID") if has_trakt_column else -1
+                
+                for row in reader:
+                    if row and len(row) > 0:  # 确保有数据
+                        # 添加IMDB ID到已处理集合
+                        if row[0] and row[0] != "unknown":  # IMDB ID
+                            processed_imdb_ids.add(row[0])
+                        
+                        # 添加Trakt ID到已处理集合(如果表头包含Trakt ID列)
+                        if has_trakt_column and trakt_index >= 0 and trakt_index < len(row) and row[trakt_index] and row[trakt_index] != "unknown":
+                            processed_trakt_ids.add(row[trakt_index])
+                            
+            print(f"从失败日志中读取到 {len(processed_imdb_ids)} 个已处理的IMDB ID")
+            print(f"从失败日志中读取到 {len(processed_trakt_ids)} 个已处理的Trakt ID")
+        except Exception as e:
+            print(f"读取已存在的失败日志时出错: {str(e)}")
     
     # 初始化输出文件，如果不存在则写入表头
     if not os.path.exists(output_csv):
@@ -603,13 +705,13 @@ def convert_csv():
     if not os.path.exists(success_log):
         with open(success_log, 'w', newline='', encoding='utf-8') as success_file:
             success_writer = csv.writer(success_file)
-            success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型"])
+            success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型", "原Trakt ID"])
     
     # 初始化失败日志文件，如果不存在则写入表头
     if not os.path.exists(failure_log):
         with open(failure_log, 'w', newline='', encoding='utf-8') as failure_file:
             failure_writer = csv.writer(failure_file)
-            failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型"])
+            failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型", "原Trakt ID"])
     
     # 读取输入CSV并逐条处理
     with open(input_csv, newline='', encoding='utf-8') as infile:
@@ -625,9 +727,19 @@ def convert_csv():
                 imdb_id = row.get("imdb", "")  # 使用"imdb"字段
                 trakt_id = row.get("trakt", "")  # 使用"trakt"字段
                 
-                # 检查是否已处理过该IMDB ID
+                # 检查是否已处理过该IMDB ID或Trakt ID
+                skip_item = False
+                skip_reason = ""
+                
                 if imdb_id and imdb_id in processed_imdb_ids:
-                    print(f"\n处理进度: [{processed_items}/{total_items}] - 跳过已处理的IMDB ID: {imdb_id}")
+                    skip_item = True
+                    skip_reason = f"跳过已处理的IMDB ID: {imdb_id}"
+                elif trakt_id and trakt_id in processed_trakt_ids:  # 新增: 检查Trakt ID是否已处理
+                    skip_item = True
+                    skip_reason = f"跳过已处理的Trakt ID: {trakt_id}"
+                
+                if skip_item:
+                    print(f"\n处理进度: [{processed_items}/{total_items}] - {skip_reason}")
                     skipped_items += 1
                     continue
                 
@@ -699,12 +811,18 @@ def convert_csv():
                     # 记录失败日志
                     with open(failure_log, 'a', newline='', encoding='utf-8') as failure_file:
                         failure_writer = csv.writer(failure_file)
-                        failure_writer.writerow([imdb_id, csv_title, failure_reason, country_name, media_type])
+                        failure_writer.writerow([imdb_id, csv_title, failure_reason, country_name, media_type, trakt_id])  # 添加Trakt ID
+                    
+                    # 将ID添加到已处理集合中，即使匹配失败也标记为已处理 - 这是修复的关键
+                    if imdb_id:
+                        processed_imdb_ids.add(imdb_id)
+                    if trakt_id:
+                        processed_trakt_ids.add(trakt_id)
                     
                     continue
                 
                 # 检查是否已处理过该Bangumi ID
-                if bangumi_id in processed_ids:
+                if bangumi_id in processed_bangumi_ids:
                     print(f"跳过已处理的Bangumi ID: {bangumi_id}")
                     skipped_items += 1
                     
@@ -719,12 +837,15 @@ def convert_csv():
                             bgm_cn_title, 
                             f"{similarity:.3f}", 
                             country_name, 
-                            media_type
+                            media_type,
+                            trakt_id  # 添加Trakt ID
                         ])
                     
-                    # 将IMDB ID添加到已处理集合中
+                    # 将ID添加到已处理集合中
                     if imdb_id:
                         processed_imdb_ids.add(imdb_id)
+                    if trakt_id:  # 新增: 添加Trakt ID到已处理集合
+                        processed_trakt_ids.add(trakt_id)
                     
                     continue
                 
@@ -754,13 +875,16 @@ def convert_csv():
                         bgm_cn_title, 
                         f"{similarity:.3f}", 
                         country_name, 
-                        media_type
+                        media_type,
+                        trakt_id  # 添加Trakt ID
                     ])
                 
                 # 将ID添加到已处理集合中
-                processed_ids.add(bangumi_id)
+                processed_bangumi_ids.add(bangumi_id)
                 if imdb_id:
                     processed_imdb_ids.add(imdb_id)
+                if trakt_id:  # 新增: 添加Trakt ID到已处理集合
+                    processed_trakt_ids.add(trakt_id)
                 
                 # 判断类型：如果是日本作品，默认为"动画"，否则为"电影"或"剧集"
                 if tmdb_data["country"] == "jp":
@@ -800,14 +924,21 @@ def convert_csv():
                         row.get('title', 'unknown'), 
                         f"处理异常: {str(e)}", 
                         row.get('country_name', '未知'), 
-                        row.get('media_type', 'unknown')
+                        row.get('media_type', 'unknown'),
+                        row.get('trakt', 'unknown')  # 添加Trakt ID
                     ])
                 
                 # 记录错误，继续处理下一条
                 with open('error_log.txt', 'a', encoding='utf-8') as error_log:
-                    error_log.write(f"处理失败 [{processed_items}/{total_items}]: IMDB ID={row.get('imdb', 'unknown')}, 标题={row.get('title', 'unknown')}, 错误: {str(e)}\n")
+                    error_log.write(f"处理失败 [{processed_items}/{total_items}]: IMDB ID={row.get('imdb', 'unknown')}, Trakt ID={row.get('trakt', 'unknown')}, 标题={row.get('title', 'unknown')}, 错误: {str(e)}\n")
                     import traceback
                     error_log.write(traceback.format_exc() + "\n\n")
+                
+                # 同样将ID添加到已处理集合中，即使处理异常也标记为已处理 - 这是修复的第二个关键点
+                if row.get('imdb'):
+                    processed_imdb_ids.add(row.get('imdb'))
+                if row.get('trakt'):
+                    processed_trakt_ids.add(row.get('trakt'))
                     
     # 完成后的总结
     final_match_rate = (successful_matches / (total_items - skipped_items) * 100) if (total_items - skipped_items) > 0 else 0
