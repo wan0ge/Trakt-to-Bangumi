@@ -751,13 +751,13 @@ def convert_csv():
     if not os.path.exists(success_log):
         with open(success_log, 'w', newline='', encoding='utf-8') as success_file:
             success_writer = csv.writer(success_file)
-            success_writer.writerow(["原IMDB ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型", "原Trakt ID"])
+            success_writer.writerow(["原IMDB ID", "原Trakt ID", "原标题", "匹配Bangumi ID", "匹配日文标题", "匹配中文标题", "相似度", "制作地区", "TMDB类型"])
     
     # 初始化失败日志文件，如果不存在则写入表头
     if not os.path.exists(failure_log):
         with open(failure_log, 'w', newline='', encoding='utf-8') as failure_file:
             failure_writer = csv.writer(failure_file)
-            failure_writer.writerow(["原IMDB ID", "原标题", "失败原因", "制作地区", "TMDB类型", "原Trakt ID"])
+            failure_writer.writerow(["原IMDB ID", "原Trakt ID", "原标题", "失败原因", "制作地区", "TMDB类型"])
     
     # 读取输入CSV并逐条处理
     with open(input_csv, newline='', encoding='utf-8') as infile:
@@ -857,7 +857,7 @@ def convert_csv():
                     # 记录失败日志
                     with open(failure_log, 'a', newline='', encoding='utf-8') as failure_file:
                         failure_writer = csv.writer(failure_file)
-                        failure_writer.writerow([imdb_id, csv_title, failure_reason, country_name, media_type, trakt_id])  # 添加Trakt ID
+                        failure_writer.writerow([imdb_id, trakt_id, csv_title, failure_reason, country_name, media_type])  # 添加Trakt ID
                     
                     # 将ID添加到已处理集合中，即使匹配失败也标记为已处理 - 这是修复的关键
                     if imdb_id:
@@ -915,14 +915,14 @@ def convert_csv():
                     success_writer = csv.writer(success_file)
                     success_writer.writerow([
                         imdb_id, 
+						trakt_id, 
                         csv_title, 
                         bangumi_id, 
                         bgm_jp_title, 
                         bgm_cn_title, 
                         f"{similarity:.3f}", 
                         country_name, 
-                        media_type,
-                        trakt_id  # 添加Trakt ID
+                        media_type
                     ])
                 
                 # 将ID添加到已处理集合中
@@ -967,11 +967,11 @@ def convert_csv():
                     failure_writer = csv.writer(failure_file)
                     failure_writer.writerow([
                         row.get('imdb', 'unknown'), 
+                        row.get('trakt', 'unknown'), 
                         row.get('title', 'unknown'), 
                         f"处理异常: {str(e)}", 
                         row.get('country_name', '未知'), 
-                        row.get('media_type', 'unknown'),
-                        row.get('trakt', 'unknown')  # 添加Trakt ID
+                        row.get('media_type', 'unknown')
                     ])
                 
                 # 记录错误，继续处理下一条
