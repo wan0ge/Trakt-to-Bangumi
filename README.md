@@ -1,6 +1,13 @@
 # Trakt-to-Bangumi
 从Trakt迁移至Bangumi / 导出Trakt记录到Bangumi / CSV文件格式转换
 
+### 预览
+<img src="https://github.com/user-attachments/assets/6f37e343-b7ab-4a82-8cb7-0c50a5787a99" width="800px">
+
+<img src="https://github.com/user-attachments/assets/20154748-2114-48b1-8089-fdcbef4f24eb" width="800px">
+<img src="https://github.com/user-attachments/assets/1b2a6446-a331-4635-8058-b573df9c5f2e" width="800px">
+<img src="https://github.com/user-attachments/assets/bccd61ed-90d6-4da9-ba35-29e36f4a2d38" width="800px">
+
 
 ## 方案：
 
@@ -53,3 +60,5 @@ ID,类型,中文,日文,放送,排名,评分,话数,看到,状态,标签,我的�
 10380,动画,命运石之门,STEINS;GATE,2011-04-06,,,,,看过,,,,,2025-04-02,Japan
 51,动画,CLANNAD,CLANNAD -クラナド-,2007-10-04,,,,,看过,,,,,2025-04-02,Japan
 ```
+## 给小白的详细使用说明
+详见反向项目[Bangumi-to-Trakt](https://github.com/wan0ge/Bangumi-to-Trakt#%E7%BB%99%E5%B0%8F%E7%99%BD%E7%9A%84%E8%AF%A6%E7%BB%86%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E)
