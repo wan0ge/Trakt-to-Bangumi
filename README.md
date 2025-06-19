@@ -22,7 +22,7 @@
 ## 开始使用
 * Python安装本项目所需库
 ```
-pip install requests pandas chardet
+pip install requests pandas python-dateutil simplejson chardet
 ```
 
 * 使用[trakt](https://github.com/xbgmsharp/trakt)项目将Trakt历史或列表导出为CSV（导出文档：https://github.com/xbgmsharp/trakt/blob/master/export.md ）
